@@ -528,8 +528,8 @@ export async function computeDashboardData(): Promise<DashboardData> {
   // M1 vs M2 spread: (M2 - M1) / M1 * 100 — positive = contango
   const m1m2Spread = m1Price > 0 ? ((m2Price - m1Price) / m1Price) * 100 : 0;
   let m1m2Status = "Neutral";
-  if (m1m2Spread > 5) m1m2Status = "RISK OFF Contango";
-  else if (m1m2Spread < 0) m1m2Status = "RISK ON Backwardation";
+  if (m1m2Spread > 5) m1m2Status = "RISK ON Contango";
+  else if (m1m2Spread < 0) m1m2Status = "RISK OFF Backwardation";
 
   // VIX vs VIX3M ratio: >1.0 = confirmed stress
   const vixVsVix3mRatio = vix3mPrice > 0 ? vixPrice / vix3mPrice : 0;
