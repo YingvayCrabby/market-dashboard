@@ -35,11 +35,25 @@ export function PrimarySignals({ signals, ema21Indicator }: Props) {
             <span>50 SMA</span>
             <span className="text-foreground font-medium">{maAlignment.sma50.toFixed(2)}</span>
           </div>
+          <div className="border-t border-border mt-1 pt-1 flex flex-col gap-0.5">
+            <div className="flex justify-between tabular-nums">
+              <span>10/21 EMA Gap</span>
+              <span className={`font-medium ${maAlignment.ema10vs21Pct >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                {maAlignment.ema10vs21Pct >= 0 ? "+" : ""}{maAlignment.ema10vs21Pct.toFixed(2)}%
+              </span>
+            </div>
+            <div className="flex justify-between tabular-nums">
+              <span>21 EMA/50 SMA Gap</span>
+              <span className={`font-medium ${maAlignment.ema21vs50Pct >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                {maAlignment.ema21vs50Pct >= 0 ? "+" : ""}{maAlignment.ema21vs50Pct.toFixed(2)}%
+              </span>
+            </div>
+          </div>
         </div>
       </SignalCard>
 
-      {/* VIX Signal */}
-      <SignalCard title="VIX > 16" met={vixSignal.elevated}>
+      {/* VIX Signal — card color: red if VIX > 16, green if <= 16 */}
+      <SignalCard title="VIX" met={!vixSignal.elevated}>
         <div className="flex items-baseline gap-2">
           <span className="text-lg font-bold text-foreground tabular-nums">{vixSignal.value.toFixed(2)}</span>
           <span className={`text-xs font-semibold uppercase px-1.5 py-0.5 rounded ${
@@ -63,6 +77,56 @@ export function PrimarySignals({ signals, ema21Indicator }: Props) {
             ? "Low volatility environment — favorable"
             : "Complacent market conditions"}
         </p>
+        {/* VIX Term Structure */}
+        <div className="flex flex-col gap-1 mt-1.5 pt-1.5 border-t border-border">
+          {/* M1 vs M2 */}
+          <div className="flex justify-between items-center">
+            <span>M1 vs M2</span>
+            <span className={`font-semibold text-xs ${
+              vixSignal.m1m2Status.includes("RISK ON") ? "text-red-500"
+              : vixSignal.m1m2Status.includes("RISK OFF") ? "text-emerald-500"
+              : "text-amber-500"
+            }`}>
+              {vixSignal.m1m2Status}
+            </span>
+          </div>
+          {vixSignal.m1Price > 0 && (
+            <div className="flex justify-between tabular-nums text-muted-foreground">
+              <span>Spread</span>
+              <span className="text-foreground font-medium">{vixSignal.m1m2Spread >= 0 ? "+" : ""}{vixSignal.m1m2Spread.toFixed(2)}%</span>
+            </div>
+          )}
+          {/* VIX vs VIX3M */}
+          <div className="flex justify-between items-center">
+            <span>VIX vs VIX3M</span>
+            <span className={`font-semibold text-xs ${
+              vixSignal.vixVsVix3mStatus === "Stress" ? "text-red-500" : "text-emerald-500"
+            }`}>
+              {vixSignal.vixVsVix3mStatus === "Stress" ? "STRESS" : "NORMAL"}
+            </span>
+          </div>
+          {vixSignal.vixVsVix3mRatio > 0 && (
+            <div className="flex justify-between tabular-nums text-muted-foreground">
+              <span>Ratio</span>
+              <span className="text-foreground font-medium">{vixSignal.vixVsVix3mRatio.toFixed(3)}</span>
+            </div>
+          )}
+          {/* VIX vs VIX6M */}
+          <div className="flex justify-between items-center">
+            <span>VIX vs VIX6M</span>
+            <span className={`font-semibold text-xs ${
+              vixSignal.vixVsVix6mStatus === "Turbulence" ? "text-red-500" : "text-emerald-500"
+            }`}>
+              {vixSignal.vixVsVix6mStatus === "Turbulence" ? "TURBULENCE" : "NORMAL"}
+            </span>
+          </div>
+          {vixSignal.vixVsVix6mRatio > 0 && (
+            <div className="flex justify-between tabular-nums text-muted-foreground">
+              <span>Ratio</span>
+              <span className="text-foreground font-medium">{vixSignal.vixVsVix6mRatio.toFixed(3)}</span>
+            </div>
+          )}
+        </div>
       </SignalCard>
 
       {/* Follow-Through Day */}
