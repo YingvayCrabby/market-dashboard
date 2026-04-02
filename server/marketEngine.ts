@@ -249,7 +249,7 @@ const TICKER_STRIP = [
 
 // Cache to avoid hammering Yahoo on every request
 let cache: { data: DashboardData; timestamp: number } | null = null;
-const CACHE_TTL = 300_000; // 5 minutes — conserve API credits (25/day AV limit)
+const CACHE_TTL = 600_000; // 10 minutes — conserve API credits (AV: 25 calls/min but 25/day)
 
 // Persistent disk-backed cache for net highs/lows (Barchart returns 0 on weekends)
 const CACHE_FILE = path.join(process.cwd(), "net-highs-lows-cache.json");
@@ -283,19 +283,9 @@ function saveNetHighsLowsCache(data: NetHighsLowsCache) {
   }
 }
 
-async function fetchQuotes(): Promise<QuoteData[]> {
-  // Strategy: Twelve Data batch (7 symbols max) + separate call for remainder.
-  // If TD rate-limited, fall back to Alpha Vantage per-symbol.
-  const tdSymbols = TICKER_STRIP.map((t) => t.tdSymbol);
-
-  // Split: first 7 via TD, remaining via AV to stay under 8 credits/min
-  const tdBatch = tdSymbols.slice(0, 7);
-  const avBatch = tdSymbols.slice(7);
-  const tdData = await tdQuoteBatch(tdBatch);
-
+function parseTdQuotes(tdData: Record<string, any>): QuoteData[] {
   const quotes: QuoteData[] = [];
   for (const ticker of TICKER_STRIP) {
-    // Check Twelve Data result
     const q = tdData[ticker.tdSymbol];
     if (q && q.close && !q.code) {
       const price = parseFloat(q.close) || 0;
@@ -310,33 +300,16 @@ async function fetchQuotes(): Promise<QuoteData[]> {
         changePercent,
         previousClose: prevClose,
       });
-      continue;
-    }
-
-    // Fallback: Alpha Vantage
-    const av = await avQuote(ticker.tdSymbol);
-    if (av) {
-      console.log(`Got ${ticker.tdSymbol} via Alpha Vantage`);
+    } else {
       quotes.push({
         symbol: ticker.displaySymbol,
         name: ticker.name,
-        price: av.price,
-        change: av.change,
-        changePercent: av.changePct,
-        previousClose: av.prevClose,
+        price: 0,
+        change: 0,
+        changePercent: 0,
+        previousClose: 0,
       });
-      continue;
     }
-
-    console.warn(`No data for ${ticker.tdSymbol} from any source`);
-    quotes.push({
-      symbol: ticker.displaySymbol,
-      name: ticker.name,
-      price: 0,
-      change: 0,
-      changePercent: 0,
-      previousClose: 0,
-    });
   }
   return quotes;
 }
@@ -385,13 +358,27 @@ export async function computeDashboardData(): Promise<DashboardData> {
 
   console.log("Fetching fresh data from Twelve Data...");
 
-  // Fetch all data in parallel
-  // Using QQQ for Nasdaq and SPY for S&P 500 (ETF proxies for Twelve Data)
-  const [quotesData, nasdaqHistoryRaw, sp500HistoryRaw] = await Promise.all([
-    fetchQuotes(),
+  // Twelve Data: 8 credits/min. Stagger requests across minutes.
+  // Minute 1: history (2 credits) + quote batch 1 of 5 (5 credits) = 7
+  // Minute 2: quote batch 2 of 4 (4 credits)
+  const tdSymbols = TICKER_STRIP.map((t) => t.tdSymbol);
+  const batch1syms = tdSymbols.slice(0, 5);
+  const batch2syms = tdSymbols.slice(5);
+
+  console.log(`Stage 1: history + quotes batch 1 (${batch1syms.join(",")})`);
+  const [nasdaqHistoryRaw, sp500HistoryRaw, td1] = await Promise.all([
     fetchHistory("QQQ", 300),
     fetchHistory("SPY", 300),
+    tdQuoteBatch(batch1syms),
   ]);
+
+  console.log("Waiting 62s for rate limit reset...");
+  await new Promise(r => setTimeout(r, 62000));
+
+  console.log(`Stage 2: quotes batch 2 (${batch2syms.join(",")})`);
+  const td2 = await tdQuoteBatch(batch2syms);
+
+  const quotesData = parseTdQuotes({ ...td1, ...td2 });
 
   // Twelve Data includes today's bar during market hours, so no need to
   // synthesize. Just copy the arrays.
