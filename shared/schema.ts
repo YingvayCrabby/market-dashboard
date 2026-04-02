@@ -27,6 +27,10 @@ export interface WebsterEMA21Indicator {
     consecutiveDaysAbove: number; // how many consecutive days low > 21 EMA
     closedUpOnThird: boolean;
   };
+  // Consecutive days Nasdaq CLOSED below 21 EMA
+  daysClosedBelow21EMA: number;
+  // % the Nasdaq is below the 21 EMA
+  pctBelow21EMA: number;
   // 200-day context
   below200SMA: boolean;
   // Current 21 EMA value
@@ -41,11 +45,27 @@ export interface PrimarySignals {
     ema10: number;
     ema21: number;
     sma50: number;
+    ema10vs21Pct: number;  // % 10 EMA is above/below 21 EMA
+    ema21vs50Pct: number;  // % 21 EMA is above/below 50 SMA
   };
   vixSignal: {
     elevated: boolean;
     value: number;
     context: string;
+    contango: boolean;     // VIX futures in contango (VIX3M > VIX)
+    vix3m: number;         // 3-month VIX value
+    // M1 vs M2 futures term structure
+    m1Price: number;       // Front-month VIX future (^VW1VX)
+    m2Price: number;       // Second-month VIX future (^VW2VX)
+    m1m2Spread: number;    // (M2 - M1) / M1 * 100 — positive = contango
+    m1m2Status: string;    // 'RISK OFF Contango' | 'RISK ON Backwardation' | 'Neutral'
+    // VIX vs VIX3M ratio
+    vixVsVix3mRatio: number;  // VIX / VIX3M — >1.0 = confirmed stress
+    vixVsVix3mStatus: string; // 'Stress' | 'Normal'
+    // VIX vs VIX6M
+    vix6m: number;            // 6-month VIX value (^VIX6M)
+    vixVsVix6mRatio: number;  // VIX / VIX6M — >1.0 = sustained turbulence
+    vixVsVix6mStatus: string; // 'Turbulence' | 'Normal'
   };
   followThroughDay: {
     active: boolean;
