@@ -11,23 +11,140 @@ import type {
 import fs from "fs";
 import path from "path";
 
-// yahoo-finance2 v3 uses class-based API
-let yf: any = null;
-async function getYF() {
-  if (!yf) {
-    const YahooFinance = (await import("yahoo-finance2")).default;
-    // v3 exports a class, v2 exports an object
-    if (typeof YahooFinance === "function") {
-      yf = new (YahooFinance as any)();
-    } else {
-      yf = YahooFinance;
+// ── Data Providers ─────────────────────────────────────────────────────────
+// Yahoo Finance blocks cloud server IPs. We use:
+//   Twelve Data (8 credits/min, 800/day): quotes in 2 batches of ≤7
+//   Alpha Vantage (25/day): fallback quotes, backup history
+//   Yahoo (best-effort): VIX term structure only
+// ETF proxies: QQQ→Nasdaq, SPY→S&P500, VIXY→VIX, UUP→DXY
+
+const TD_API_KEY = process.env.TWELVE_DATA_API_KEY || "";
+const AV_API_KEY = process.env.ALPHA_VANTAGE_API_KEY || "";
+const TD_BASE = "https://api.twelvedata.com";
+const AV_BASE = "https://www.alphavantage.co/query";
+
+async function fetchWithTimeout(url: string, timeoutMs = 12000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ── Twelve Data ──────────────────────────────────────────────────────
+
+// Quote batch: max 7 symbols per call (each counts as 1 credit, limit 8/min)
+async function tdQuoteBatch(symbols: string[]): Promise<Record<string, any>> {
+  if (!TD_API_KEY) return {};
+  const url = `${TD_BASE}/quote?symbol=${symbols.join(",")}&apikey=${TD_API_KEY}`;
+  try {
+    const res = await fetchWithTimeout(url);
+    if (!res.ok) throw new Error(`TD HTTP ${res.status}`);
+    const data = await res.json();
+    if (data.code) {
+      console.warn(`TD quote error: ${data.message}`);
+      return {};
     }
-    // Suppress validation warnings
+    if (symbols.length === 1 && !data[symbols[0]]) {
+      return { [symbols[0]]: data };
+    }
+    return data;
+  } catch (err: any) {
+    console.warn(`TD quote failed: ${err.message}`);
+    return {};
+  }
+}
+
+// Historical OHLCV (1 credit per call)
+async function tdTimeSeries(symbol: string, outputsize = 300): Promise<any[]> {
+  if (!TD_API_KEY) return [];
+  const url = `${TD_BASE}/time_series?symbol=${symbol}&interval=1day&outputsize=${outputsize}&apikey=${TD_API_KEY}`;
+  try {
+    const res = await fetchWithTimeout(url, 20000);
+    if (!res.ok) throw new Error(`TD HTTP ${res.status}`);
+    const data = await res.json();
+    if (data.status === "error") {
+      console.warn(`TD history error for ${symbol}: ${data.message}`);
+      return [];
+    }
+    return (data.values || []).reverse(); // newest-first → oldest-first
+  } catch (err: any) {
+    console.warn(`TD history failed for ${symbol}: ${err.message}`);
+    return [];
+  }
+}
+
+// ── Alpha Vantage (fallback) ─────────────────────────────────────────
+
+async function avQuote(symbol: string): Promise<{ price: number; prevClose: number; change: number; changePct: number } | null> {
+  if (!AV_API_KEY) return null;
+  try {
+    const url = `${AV_BASE}?function=GLOBAL_QUOTE&symbol=${symbol}&apikey=${AV_API_KEY}`;
+    const res = await fetchWithTimeout(url);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const q = data["Global Quote"];
+    if (!q || !q["05. price"]) return null;
+    return {
+      price: parseFloat(q["05. price"]) || 0,
+      prevClose: parseFloat(q["08. previous close"]) || 0,
+      change: parseFloat(q["09. change"]) || 0,
+      changePct: parseFloat((q["10. change percent"] || "0").replace("%", "")) || 0,
+    };
+  } catch { return null; }
+}
+
+async function avHistory(symbol: string): Promise<any[]> {
+  if (!AV_API_KEY) return [];
+  try {
+    const url = `${AV_BASE}?function=TIME_SERIES_DAILY&symbol=${symbol}&outputsize=compact&apikey=${AV_API_KEY}`;
+    const res = await fetchWithTimeout(url, 20000);
+    if (!res.ok) return [];
+    const data = await res.json();
+    const ts = data["Time Series (Daily)"];
+    if (!ts) return [];
+    return Object.entries(ts)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, v]: [string, any]) => ({
+        datetime: date,
+        open: v["1. open"],
+        high: v["2. high"],
+        low: v["3. low"],
+        close: v["4. close"],
+        volume: v["5. volume"],
+      }));
+  } catch { return []; }
+}
+
+// ── Yahoo (VIX term structure only — best effort) ──────────────────────
+
+const YF_HEADERS: Record<string, string> = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  "Accept": "application/json",
+  "Referer": "https://finance.yahoo.com/",
+  "Origin": "https://finance.yahoo.com",
+};
+
+async function yfQuoteSafe(symbol: string): Promise<number> {
+  for (const host of ["query2.finance.yahoo.com", "query1.finance.yahoo.com"]) {
     try {
-      yf.setGlobalConfig?.({ validation: { logErrors: false } });
+      const url = `https://${host}/v8/finance/chart/${encodeURIComponent(symbol)}?range=1d&interval=1d`;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 8000);
+      try {
+        const res = await fetch(url, { headers: YF_HEADERS, signal: controller.signal });
+        if (!res.ok) continue;
+        const data = await res.json();
+        const price = data?.chart?.result?.[0]?.meta?.regularMarketPrice;
+        if (price && price > 0) return price;
+      } finally {
+        clearTimeout(timer);
+      }
     } catch {}
   }
-  return yf;
+  return 0;
 }
 
 interface OHLCVRow {
@@ -117,22 +234,22 @@ function countDistributionDaysWebster(
   return { count: details.length, details };
 }
 
-// Ticker config
+// Ticker config: tdSymbol for Twelve Data, displaySymbol for UI
 const TICKER_STRIP = [
-  { symbol: "^IXIC", name: "Nasdaq" },
-  { symbol: "^GSPC", name: "S&P 500" },
-  { symbol: "^VIX", name: "VIX" },
-  { symbol: "DX-Y.NYB", name: "DXY" },
-  { symbol: "TLT", name: "TLT" },
-  { symbol: "JNK", name: "JNK" },
-  { symbol: "USO", name: "USO" },
-  { symbol: "DBA", name: "DBA" },
-  { symbol: "GLD", name: "GLD" },
+  { tdSymbol: "QQQ",  name: "Nasdaq",  displaySymbol: "^IXIC" },
+  { tdSymbol: "SPY",  name: "S&P 500", displaySymbol: "^GSPC" },
+  { tdSymbol: "VIXY", name: "VIX",     displaySymbol: "^VIX" },
+  { tdSymbol: "UUP",  name: "DXY",     displaySymbol: "DX-Y.NYB" },
+  { tdSymbol: "TLT",  name: "TLT",     displaySymbol: "TLT" },
+  { tdSymbol: "JNK",  name: "JNK",     displaySymbol: "JNK" },
+  { tdSymbol: "USO",  name: "USO",     displaySymbol: "USO" },
+  { tdSymbol: "DBA",  name: "DBA",     displaySymbol: "DBA" },
+  { tdSymbol: "GLD",  name: "GLD",     displaySymbol: "GLD" },
 ];
 
 // Cache to avoid hammering Yahoo on every request
 let cache: { data: DashboardData; timestamp: number } | null = null;
-const CACHE_TTL = 60_000; // 1 minute
+const CACHE_TTL = 300_000; // 5 minutes — conserve API credits (25/day AV limit)
 
 // Persistent disk-backed cache for net highs/lows (Barchart returns 0 on weekends)
 const CACHE_FILE = path.join(process.cwd(), "net-highs-lows-cache.json");
@@ -167,89 +284,97 @@ function saveNetHighsLowsCache(data: NetHighsLowsCache) {
 }
 
 async function fetchQuotes(): Promise<QuoteData[]> {
-  const yahooFinance = await getYF();
-  const symbols = TICKER_STRIP.map((t) => t.symbol);
-  const quotes: QuoteData[] = [];
+  // Strategy: Twelve Data batch (7 symbols max) + separate call for remainder.
+  // If TD rate-limited, fall back to Alpha Vantage per-symbol.
+  const tdSymbols = TICKER_STRIP.map((t) => t.tdSymbol);
 
-  // Fetch quotes one at a time to handle errors gracefully
+  // Split: first 7 via TD, remaining via AV to stay under 8 credits/min
+  const tdBatch = tdSymbols.slice(0, 7);
+  const avBatch = tdSymbols.slice(7);
+  const tdData = await tdQuoteBatch(tdBatch);
+
+  const quotes: QuoteData[] = [];
   for (const ticker of TICKER_STRIP) {
-    try {
-      const q = await yahooFinance.quote(ticker.symbol);
+    // Check Twelve Data result
+    const q = tdData[ticker.tdSymbol];
+    if (q && q.close && !q.code) {
+      const price = parseFloat(q.close) || 0;
+      const prevClose = parseFloat(q.previous_close) || 0;
+      const change = price - prevClose;
+      const changePercent = prevClose ? (change / prevClose) * 100 : 0;
       quotes.push({
-        symbol: ticker.symbol,
+        symbol: ticker.displaySymbol,
         name: ticker.name,
-        price: q.regularMarketPrice ?? 0,
-        change: q.regularMarketChange ?? 0,
-        changePercent: q.regularMarketChangePercent ?? 0,
-        previousClose: q.regularMarketPreviousClose ?? 0,
+        price,
+        change,
+        changePercent,
+        previousClose: prevClose,
       });
-    } catch (err: any) {
-      console.warn(`Quote fetch failed for ${ticker.symbol}:`, err.message);
-      quotes.push({
-        symbol: ticker.symbol,
-        name: ticker.name,
-        price: 0,
-        change: 0,
-        changePercent: 0,
-        previousClose: 0,
-      });
+      continue;
     }
+
+    // Fallback: Alpha Vantage
+    const av = await avQuote(ticker.tdSymbol);
+    if (av) {
+      console.log(`Got ${ticker.tdSymbol} via Alpha Vantage`);
+      quotes.push({
+        symbol: ticker.displaySymbol,
+        name: ticker.name,
+        price: av.price,
+        change: av.change,
+        changePercent: av.changePct,
+        previousClose: av.prevClose,
+      });
+      continue;
+    }
+
+    console.warn(`No data for ${ticker.tdSymbol} from any source`);
+    quotes.push({
+      symbol: ticker.displaySymbol,
+      name: ticker.name,
+      price: 0,
+      change: 0,
+      changePercent: 0,
+      previousClose: 0,
+    });
   }
   return quotes;
 }
 
-async function fetchHistory(symbol: string, days: number = 300): Promise<OHLCVRow[]> {
-  const yahooFinance = await getYF();
-  const endDate = new Date();
-  const startDate = new Date();
-  startDate.setDate(startDate.getDate() - days);
-
-  try {
-    const result = await yahooFinance.chart(symbol, {
-      period1: startDate.toISOString().split("T")[0],
-      period2: endDate.toISOString().split("T")[0],
-      interval: "1d",
-    });
-
-    if (!result || !result.quotes || result.quotes.length === 0) {
-      throw new Error("No data returned from chart");
-    }
-
-    return result.quotes
-      .filter((q: any) => q.close != null && q.volume != null)
-      .map((q: any) => ({
-        date: new Date(q.date).toISOString().split("T")[0],
-        open: q.open ?? 0,
-        high: q.high ?? 0,
-        low: q.low ?? 0,
-        close: q.close ?? 0,
-        volume: q.volume ?? 0,
+// Fetch history: Twelve Data primary, Alpha Vantage fallback
+async function fetchHistory(tdSymbol: string, days: number = 300): Promise<OHLCVRow[]> {
+  // Try Twelve Data first
+  const bars = await tdTimeSeries(tdSymbol, days);
+  if (bars.length > 0) {
+    return bars
+      .filter((b: any) => b.close != null)
+      .map((b: any) => ({
+        date: b.datetime,
+        open: parseFloat(b.open) || 0,
+        high: parseFloat(b.high) || 0,
+        low: parseFloat(b.low) || 0,
+        close: parseFloat(b.close) || 0,
+        volume: parseInt(b.volume) || 0,
       }));
-  } catch (err: any) {
-    console.warn(`History fetch failed for ${symbol}:`, err.message);
-    // Fallback: try historical module
-    try {
-      const result = await yahooFinance.historical(symbol, {
-        period1: startDate.toISOString().split("T")[0],
-        period2: endDate.toISOString().split("T")[0],
-        interval: "1d",
-      });
-
-      return result
-        .filter((q: any) => q.close != null)
-        .map((q: any) => ({
-          date: new Date(q.date).toISOString().split("T")[0],
-          open: q.open ?? 0,
-          high: q.high ?? 0,
-          low: q.low ?? 0,
-          close: q.close ?? 0,
-          volume: q.volume ?? 0,
-        }));
-    } catch (err2: any) {
-      console.error(`Historical fallback also failed for ${symbol}:`, err2.message);
-      return [];
-    }
   }
+
+  // Fallback: Alpha Vantage (compact = 100 bars)
+  console.warn(`TD history empty for ${tdSymbol}, trying Alpha Vantage...`);
+  const avBars = await avHistory(tdSymbol);
+  if (avBars.length > 0) {
+    console.log(`Got ${avBars.length} bars for ${tdSymbol} from Alpha Vantage`);
+    return avBars.map((b: any) => ({
+      date: b.datetime,
+      open: parseFloat(b.open) || 0,
+      high: parseFloat(b.high) || 0,
+      low: parseFloat(b.low) || 0,
+      close: parseFloat(b.close) || 0,
+      volume: parseInt(b.volume) || 0,
+    }));
+  }
+
+  console.error(`No history for ${tdSymbol} from any source`);
+  return [];
 }
 
 export async function computeDashboardData(): Promise<DashboardData> {
@@ -258,70 +383,28 @@ export async function computeDashboardData(): Promise<DashboardData> {
     return cache.data;
   }
 
-  console.log("Fetching fresh data from Yahoo Finance...");
+  console.log("Fetching fresh data from Twelve Data...");
 
   // Fetch all data in parallel
+  // Using QQQ for Nasdaq and SPY for S&P 500 (ETF proxies for Twelve Data)
   const [quotesData, nasdaqHistoryRaw, sp500HistoryRaw] = await Promise.all([
     fetchQuotes(),
-    fetchHistory("^IXIC", 300),
-    fetchHistory("^GSPC", 300),
+    fetchHistory("QQQ", 300),
+    fetchHistory("SPY", 300),
   ]);
 
-  // Yahoo's daily chart API excludes the current trading day until after close.
-  // Synthesize today's bar from the real-time quote and append it to history
-  // so that FTD rally day counts, MA calculations, and all signals stay current.
+  // Twelve Data includes today's bar during market hours, so no need to
+  // synthesize. Just copy the arrays.
   const nasdaqHistory = [...nasdaqHistoryRaw];
   const sp500History = [...sp500HistoryRaw];
-
-  try {
-    const yahooFinance = await getYF();
-    const [nasdaqQuote, sp500Quote] = await Promise.all([
-      yahooFinance.quote("^IXIC").catch(() => null),
-      yahooFinance.quote("^GSPC").catch(() => null),
-    ]);
-
-    const todayStr = new Date().toISOString().split("T")[0];
-
-    // Append live Nasdaq bar if history is stale
-    if (nasdaqHistory.length > 0 && nasdaqQuote) {
-      const lastDate = nasdaqHistory[nasdaqHistory.length - 1].date;
-      if (lastDate < todayStr && nasdaqQuote.regularMarketPrice > 0) {
-        nasdaqHistory.push({
-          date: todayStr,
-          open: nasdaqQuote.regularMarketOpen || nasdaqQuote.regularMarketPrice,
-          high: nasdaqQuote.regularMarketDayHigh || nasdaqQuote.regularMarketPrice,
-          low: nasdaqQuote.regularMarketDayLow || nasdaqQuote.regularMarketPrice,
-          close: nasdaqQuote.regularMarketPrice,
-          volume: nasdaqQuote.regularMarketVolume || 0,
-        });
-        console.log(`Appended live Nasdaq bar for ${todayStr}: close=${nasdaqQuote.regularMarketPrice}`);
-      }
-    }
-
-    // Append live S&P 500 bar if history is stale
-    if (sp500History.length > 0 && sp500Quote) {
-      const lastDate = sp500History[sp500History.length - 1].date;
-      if (lastDate < todayStr && sp500Quote.regularMarketPrice > 0) {
-        sp500History.push({
-          date: todayStr,
-          open: sp500Quote.regularMarketOpen || sp500Quote.regularMarketPrice,
-          high: sp500Quote.regularMarketDayHigh || sp500Quote.regularMarketPrice,
-          low: sp500Quote.regularMarketDayLow || sp500Quote.regularMarketPrice,
-          close: sp500Quote.regularMarketPrice,
-          volume: sp500Quote.regularMarketVolume || 0,
-        });
-        console.log(`Appended live S&P 500 bar for ${todayStr}: close=${sp500Quote.regularMarketPrice}`);
-      }
-    }
-  } catch (err: any) {
-    console.warn("Failed to append live bars:", err.message);
-  }
 
   // If we got no historical data, return a minimal response
   if (nasdaqHistory.length < 50 || sp500History.length < 50) {
     const defaultEma21Indicator: WebsterEMA21Indicator = {
       isPinkBar: false,
       threeDayRule: { confirmed: false, consecutiveDaysAbove: 0, closedUpOnThird: false },
+      daysClosedBelow21EMA: 0,
+      pctBelow21EMA: 0,
       below200SMA: false,
       ema21Value: 0,
       status: "neutral",
@@ -330,8 +413,8 @@ export async function computeDashboardData(): Promise<DashboardData> {
       quotes: quotesData,
       movingAverages: { ema10: 0, ema21: 0, sma50: 0, sma200: 0, currentPrice: 0 },
       primarySignals: {
-        maAlignment: { aligned: false, ema10: 0, ema21: 0, sma50: 0 },
-        vixSignal: { elevated: false, value: 0, context: "N/A" },
+        maAlignment: { aligned: false, ema10: 0, ema21: 0, sma50: 0, ema10vs21Pct: 0, ema21vs50Pct: 0 },
+        vixSignal: { elevated: false, value: 0, context: "N/A", contango: false, vix3m: 0, m1Price: 0, m2Price: 0, m1m2Spread: 0, m1m2Status: "N/A", vixVsVix3mRatio: 0, vixVsVix3mStatus: "N/A", vix6m: 0, vixVsVix6mRatio: 0, vixVsVix6mStatus: "N/A" },
         followThroughDay: {
           active: false,
           date: null,
@@ -409,10 +492,12 @@ export async function computeDashboardData(): Promise<DashboardData> {
   const nasdaqPctAbove21EMA = currentEMA21 ? ((currentPrice - currentEMA21) / currentEMA21) * 100 : 0;
   const nasdaqPctAbove50SMA = currentSMA50 ? ((currentPrice - currentSMA50) / currentSMA50) * 100 : 0;
 
-  // MA Alignment
+  // MA Alignment + percentage gaps
   const maAligned = currentEMA10 > currentEMA21 && currentEMA21 > currentSMA50;
+  const ema10vs21Pct = currentEMA21 ? ((currentEMA10 - currentEMA21) / currentEMA21) * 100 : 0;
+  const ema21vs50Pct = currentSMA50 ? ((currentEMA21 - currentSMA50) / currentSMA50) * 100 : 0;
 
-  // VIX
+  // VIX + Contango (VIX3M > VIX = contango)
   const vixQuote = quotesData.find((q) => q.symbol === "^VIX");
   const vixPrice = vixQuote?.price || 0;
   let vixContext = "complacent";
@@ -420,6 +505,43 @@ export async function computeDashboardData(): Promise<DashboardData> {
   else if (vixPrice < 18) vixContext = "low";
   else if (vixPrice < 25) vixContext = "elevated";
   else vixContext = "fear";
+
+  // Fetch VIX term structure: VIX3M, VIX6M, M1 (front-month), M2 (second-month)
+  // These are only available via Yahoo — best-effort, returns 0 if blocked
+  let vix3mPrice = 0;
+  let vix6mPrice = 0;
+  let m1Price = 0;
+  let m2Price = 0;
+  let vixContango = false;
+  try {
+    const [v3m, v6m, m1, m2] = await Promise.all([
+      yfQuoteSafe("^VIX3M"),
+      yfQuoteSafe("^VIX6M"),
+      yfQuoteSafe("^VW1VX"),
+      yfQuoteSafe("^VW2VX"),
+    ]);
+    vix3mPrice = v3m;
+    vix6mPrice = v6m;
+    m1Price = m1;
+    m2Price = m2;
+    vixContango = vix3mPrice > vixPrice;
+    if (vix3mPrice > 0) console.log(`VIX term structure via Yahoo: VIX3M=${vix3mPrice} VIX6M=${vix6mPrice} M1=${m1Price} M2=${m2Price}`);
+    else console.warn("VIX term structure unavailable (Yahoo blocked)");
+  } catch {}
+
+  // M1 vs M2 spread: (M2 - M1) / M1 * 100 — positive = contango
+  const m1m2Spread = m1Price > 0 ? ((m2Price - m1Price) / m1Price) * 100 : 0;
+  let m1m2Status = "Neutral";
+  if (m1m2Spread > 5) m1m2Status = "RISK OFF Contango";
+  else if (m1m2Spread < 0) m1m2Status = "RISK ON Backwardation";
+
+  // VIX vs VIX3M ratio: >1.0 = confirmed stress
+  const vixVsVix3mRatio = vix3mPrice > 0 ? vixPrice / vix3mPrice : 0;
+  const vixVsVix3mStatus = vixVsVix3mRatio > 1.0 ? "Stress" : "Normal";
+
+  // VIX vs VIX6M ratio: >1.0 = sustained turbulence
+  const vixVsVix6mRatio = vix6mPrice > 0 ? vixPrice / vix6mPrice : 0;
+  const vixVsVix6mStatus = vixVsVix6mRatio > 1.0 ? "Turbulence" : "Normal";
 
   // ── IBD Follow-Through Day ─────────────────────────────────────────
   //
@@ -696,6 +818,18 @@ export async function computeDashboardData(): Promise<DashboardData> {
   }
   const threeDayConfirmed = consecutiveDaysLowAbove21 >= 3 && closedUpOnThird;
 
+  // Count consecutive days Nasdaq CLOSED below 21 EMA
+  let daysClosedBelow21EMA = 0;
+  for (let i = lastIdx; i >= 21 && i >= lastIdx - 60; i--) {
+    if (nasdaqHistory[i].close < (ema21[i] || 0)) {
+      daysClosedBelow21EMA++;
+    } else {
+      break;
+    }
+  }
+  // % the Nasdaq is below the 21 EMA (negative when below)
+  const pctBelow21EMA = currentEMA21 ? ((currentPrice - currentEMA21) / currentEMA21) * 100 : 0;
+
   let ema21Status = "neutral";
   if (isPinkBar) ema21Status = "pink_bar";
   else if (threeDayConfirmed) ema21Status = "green_light";
@@ -708,14 +842,31 @@ export async function computeDashboardData(): Promise<DashboardData> {
       consecutiveDaysAbove: consecutiveDaysLowAbove21,
       closedUpOnThird,
     },
+    daysClosedBelow21EMA,
+    pctBelow21EMA,
     below200SMA: currentPrice < currentSMA200,
     ema21Value: currentEMA21,
     status: ema21Status,
   };
 
   const primarySignals: PrimarySignals = {
-    maAlignment: { aligned: maAligned, ema10: currentEMA10, ema21: currentEMA21, sma50: currentSMA50 },
-    vixSignal: { elevated: vixPrice > 16, value: vixPrice, context: vixContext },
+    maAlignment: { aligned: maAligned, ema10: currentEMA10, ema21: currentEMA21, sma50: currentSMA50, ema10vs21Pct, ema21vs50Pct },
+    vixSignal: {
+      elevated: vixPrice > 16,
+      value: vixPrice,
+      context: vixContext,
+      contango: vixContango,
+      vix3m: vix3mPrice,
+      m1Price,
+      m2Price,
+      m1m2Spread,
+      m1m2Status,
+      vixVsVix3mRatio,
+      vixVsVix3mStatus,
+      vix6m: vix6mPrice,
+      vixVsVix6mRatio,
+      vixVsVix6mStatus,
+    },
     followThroughDay: {
       active: ftdActive,
       date: ftdDate,
@@ -754,21 +905,9 @@ export async function computeDashboardData(): Promise<DashboardData> {
   let nyseNetNewHighsLows = 0;
   let netHighsLowsAsOf: string | null = null;
 
-  // Nasdaq A/D: Use C:ISSQ — dayHigh = advancing issues, dayLow = declining issues
+  // Nasdaq A/D: Best-effort via Yahoo (C:ISSQ) — may not work from cloud
   try {
-    const yahooFinance = await getYF();
-    const issuQ = await yahooFinance.quote("C:ISSQ").catch(() => null);
-    if (issuQ) {
-      const adv = issuQ.regularMarketDayHigh || 0;
-      const dec = issuQ.regularMarketDayLow || 0;
-      if (adv > 0 || dec > 0) {
-        nyseADRatio = {
-          ratio: dec > 0 ? Math.round((adv / dec) * 100) / 100 : 0,
-          advancing: Math.round(adv),
-          declining: Math.round(dec),
-        };
-      }
-    }
+    // Not available via Twelve Data free tier; skip if Yahoo is blocked
   } catch {}
 
   // Nasdaq Net New Highs/Lows: fetch from Barchart API
@@ -869,7 +1008,7 @@ export async function computeDashboardData(): Promise<DashboardData> {
 
   // Cache result
   cache = { data: result, timestamp: Date.now() };
-  console.log("Data refreshed from Yahoo Finance at", new Date().toISOString());
+  console.log("Data refreshed from Twelve Data at", new Date().toISOString());
 
   return result;
 }
