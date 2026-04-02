@@ -358,27 +358,36 @@ export async function computeDashboardData(): Promise<DashboardData> {
 
   console.log("Fetching fresh data from Twelve Data...");
 
-  // Twelve Data: 8 credits/min. Stagger requests across minutes.
-  // Minute 1: history (2 credits) + quote batch 1 of 5 (5 credits) = 7
-  // Minute 2: quote batch 2 of 4 (4 credits)
+  // Twelve Data: 8 credits/min (each symbol in batch = 1 credit).
+  // We have 9 quote symbols + 2 history = 11 total. Can't fit in 1 minute.
+  // Strategy: fetch 6 quotes + 2 history = 8 credits in first call,
+  // then remaining 3 quotes via Alpha Vantage (no TD credit cost).
   const tdSymbols = TICKER_STRIP.map((t) => t.tdSymbol);
-  const batch1syms = tdSymbols.slice(0, 5);
-  const batch2syms = tdSymbols.slice(5);
+  const tdBatch = tdSymbols.slice(0, 6);  // 6 credits
+  const avBatch = tdSymbols.slice(6);     // 3 via Alpha Vantage
 
-  console.log(`Stage 1: history + quotes batch 1 (${batch1syms.join(",")})`);
+  console.log(`Fetching: history(2) + TD quotes(${tdBatch.join(",")}) + AV quotes(${avBatch.join(",")})`);
   const [nasdaqHistoryRaw, sp500HistoryRaw, td1] = await Promise.all([
-    fetchHistory("QQQ", 300),
-    fetchHistory("SPY", 300),
-    tdQuoteBatch(batch1syms),
+    fetchHistory("QQQ", 300),   // 1 TD credit
+    fetchHistory("SPY", 300),   // 1 TD credit
+    tdQuoteBatch(tdBatch),      // 6 TD credits = total 8
   ]);
 
-  console.log("Waiting 62s for rate limit reset...");
-  await new Promise(r => setTimeout(r, 62000));
+  // Remaining 3 quotes via Alpha Vantage (no TD credits)
+  const avResults: Record<string, any> = {};
+  for (const sym of avBatch) {
+    const av = await avQuote(sym);
+    if (av && av.price > 0) {
+      avResults[sym] = {
+        close: String(av.price),
+        previous_close: String(av.prevClose),
+        percent_change: String(av.changePct),
+      };
+      console.log(`Got ${sym} via Alpha Vantage: $${av.price}`);
+    }
+  }
 
-  console.log(`Stage 2: quotes batch 2 (${batch2syms.join(",")})`);
-  const td2 = await tdQuoteBatch(batch2syms);
-
-  const quotesData = parseTdQuotes({ ...td1, ...td2 });
+  const quotesData = parseTdQuotes({ ...td1, ...avResults });
 
   // Twelve Data includes today's bar during market hours, so no need to
   // synthesize. Just copy the arrays.
