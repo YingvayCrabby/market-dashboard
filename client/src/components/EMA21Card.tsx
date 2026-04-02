@@ -7,14 +7,14 @@ interface Props {
 }
 
 export function EMA21Card({ indicator }: Props) {
-  const { isPinkBar, threeDayRule, daysClosedBelow21EMA, pctBelow21EMA, below200SMA, ema21Value, status } = indicator;
+  const { isPinkBar, threeDayRule, below200SMA, ema21Value, status } = indicator;
 
   const statusLabel = {
     green_light: "GREEN LIGHT",
-    pink_bar: "BELOW 21 EMA",
+    pink_bar: "PINK BAR",
     confirming: "CONFIRMING",
-    neutral: "ABOVE 21 EMA",
-  }[status] ?? "ABOVE 21 EMA";
+    neutral: "NEUTRAL",
+  }[status] ?? "NEUTRAL";
 
   const statusColors: Record<string, string> = {
     green_light: "bg-emerald-500/15 text-emerald-500",
@@ -38,13 +38,13 @@ export function EMA21Card({ indicator }: Props) {
         </span>
       </div>
 
-      {/* High > 21 EMA */}
+      {/* Pink Bar */}
       <div className="flex justify-between items-center">
-        <span>High &gt; 21 EMA</span>
+        <span>Pink Bar (High &lt; 21 EMA)</span>
         <span
-          className={`font-semibold ${!isPinkBar ? "text-emerald-500" : "text-red-500"}`}
+          className={`font-semibold ${isPinkBar ? "text-red-500" : "text-emerald-500"}`}
         >
-          {!isPinkBar ? "YES" : "NO"}
+          {isPinkBar ? "YES" : "NO"}
         </span>
       </div>
 
@@ -81,20 +81,6 @@ export function EMA21Card({ indicator }: Props) {
           </div>
         )}
       </div>
-
-      {/* Days closed below / % below */}
-      {daysClosedBelow21EMA > 0 && (
-        <div className="flex flex-col gap-0.5 mt-1 pt-1 border-t border-border">
-          <div className="flex justify-between tabular-nums">
-            <span>Days Closed Below</span>
-            <span className="text-red-500 font-medium">{daysClosedBelow21EMA}</span>
-          </div>
-          <div className="flex justify-between tabular-nums">
-            <span>% Below 21 EMA</span>
-            <span className="text-red-500 font-medium">{pctBelow21EMA.toFixed(2)}%</span>
-          </div>
-        </div>
-      )}
 
       {/* 21 EMA Value */}
       <div className="flex justify-between tabular-nums mt-1">
