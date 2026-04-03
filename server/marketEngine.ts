@@ -793,11 +793,61 @@ export async function computeDashboardData(): Promise<DashboardData> {
     pointGap: currentEMA21 - currentSMA50,
   };
 
-  const prevSMA50 = sma50[lastIdx - 1] || 0;
-  const sma50Slope = currentSMA50 - prevSMA50;
+  // 50 SMA Trend: linear regression over last 90 trading days.
+  // Uses slope significance (R² ≥ 0.3, p ≤ 0.05) to filter noise.
+  // Returns UPTREND / DOWNTREND / NEUTRAL (choppy/sideways).
+  function linearRegression(values: number[]): { slope: number; rSquared: number; pValue: number } {
+    const n = values.length;
+    if (n < 2) return { slope: 0, rSquared: 0, pValue: 1 };
+    let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0, sumY2 = 0;
+    for (let i = 0; i < n; i++) {
+      sumX += i;
+      sumY += values[i];
+      sumXY += i * values[i];
+      sumX2 += i * i;
+      sumY2 += values[i] * values[i];
+    }
+    const denom = n * sumX2 - sumX * sumX;
+    if (denom === 0) return { slope: 0, rSquared: 0, pValue: 1 };
+    const slope = (n * sumXY - sumX * sumY) / denom;
+    const meanY = sumY / n;
+    let ssTot = 0, ssRes = 0;
+    const intercept = (sumY - slope * sumX) / n;
+    for (let i = 0; i < n; i++) {
+      const predicted = intercept + slope * i;
+      ssRes += (values[i] - predicted) ** 2;
+      ssTot += (values[i] - meanY) ** 2;
+    }
+    const rSquared = ssTot > 0 ? 1 - ssRes / ssTot : 0;
+    // t-statistic for slope significance → approximate p-value
+    const df = n - 2;
+    const slopeStdErr = Math.sqrt(ssRes / df / (sumX2 - sumX * sumX / n)) || Infinity;
+    const tStat = slope / slopeStdErr;
+    // Two-tailed p-value approximation using t-distribution
+    // For large df (>30), approximate with normal distribution
+    const abst = Math.abs(tStat);
+    const pValue = df > 0 ? Math.exp(-0.717 * abst - 0.416 * abst * abst) : 1; // fast approximation
+    return { slope, rSquared, pValue };
+  }
+
+  const sma50Window = 90;
+  const sma50Values: number[] = [];
+  for (let i = Math.max(0, lastIdx - sma50Window + 1); i <= lastIdx; i++) {
+    if (sma50[i]) sma50Values.push(sma50[i]);
+  }
+  const { slope: sma50Slope, rSquared: sma50R2, pValue: sma50PVal } = linearRegression(sma50Values);
+
+  let sma50TrendDirection: string;
+  if (sma50PVal > 0.05 || sma50R2 < 0.3) {
+    sma50TrendDirection = "sideways";  // not statistically significant or poor fit
+  } else {
+    sma50TrendDirection = sma50Slope > 0 ? "up" : "down";
+  }
+  console.log(`50 SMA trend (${sma50Values.length}d): slope=${sma50Slope.toFixed(4)} R²=${sma50R2.toFixed(3)} p=${sma50PVal.toFixed(4)} → ${sma50TrendDirection}`);
+
   const sma50TrendingUp = {
-    met: sma50Slope > 0,
-    dailySlope: sma50Slope,
+    met: sma50TrendDirection === "up",
+    dailySlope: sma50Slope,  // raw slope (points per day)
   };
 
   const closeAbove21EMA = {
