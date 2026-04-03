@@ -827,7 +827,7 @@ export async function computeDashboardData(): Promise<DashboardData> {
   const pctBelow21EMA = currentEMA21 ? ((currentPrice - currentEMA21) / currentEMA21) * 100 : 0;
 
   let ema21Status = "neutral";
-  if (isPinkBar) ema21Status = "pink_bar";
+  if (isPinkBar) ema21Status = "caution";
   else if (threeDayConfirmed) ema21Status = "green_light";
   else if (consecutiveDaysLowAbove21 >= 1) ema21Status = "confirming";
 
