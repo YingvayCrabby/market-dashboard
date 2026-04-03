@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { DashboardData } from "@shared/schema";
 import { TickerStrip } from "@/components/TickerStrip";
 import { PrimarySignals } from "@/components/PrimarySignals";
+import { PowerTrendCards } from "@/components/PowerTrendCards";
 import { MovingAveragesCards } from "@/components/MovingAveragesCards";
 import { MarketHealthCards } from "@/components/MarketHealthCards";
 import { RefreshCw, TrendingUp, Moon, Sun } from "lucide-react";
@@ -90,6 +91,12 @@ export default function Dashboard() {
         <section className="mt-5">
           <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-3">Primary Signals</h2>
           <PrimarySignals signals={data.primarySignals} ema21Indicator={data.ema21Indicator} />
+        </section>
+
+        {/* Power Trend Conditions */}
+        <section className="mt-6">
+          <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-3">Power Trend Conditions</h2>
+          <PowerTrendCards conditions={data.powerTrendConditions} />
         </section>
 
         {/* Moving Averages */}
