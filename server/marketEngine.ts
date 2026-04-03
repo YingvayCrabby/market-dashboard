@@ -216,7 +216,7 @@ async function calculateDXY(): Promise<{ price: number; prevClose: number } | nu
   }
 }
 
-// ── Yahoo (VIX futures M1/M2 only — best effort) ──────────────────
+// ── Yahoo Finance v8 chart — indices, VIX futures, history ───────────
 
 const YF_HEADERS: Record<string, string> = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -225,6 +225,7 @@ const YF_HEADERS: Record<string, string> = {
   "Origin": "https://finance.yahoo.com",
 };
 
+// Simple price-only fetch (for VIX futures etc.)
 async function yfQuoteSafe(symbol: string): Promise<number> {
   for (const host of ["query2.finance.yahoo.com", "query1.finance.yahoo.com"]) {
     try {
@@ -243,6 +244,70 @@ async function yfQuoteSafe(symbol: string): Promise<number> {
     } catch {}
   }
   return 0;
+}
+
+// Full quote with change data (for ticker strip overrides)
+async function yfQuoteFull(symbol: string): Promise<{ price: number; prevClose: number; change: number; changePct: number } | null> {
+  for (const host of ["query2.finance.yahoo.com", "query1.finance.yahoo.com"]) {
+    try {
+      const url = `https://${host}/v8/finance/chart/${encodeURIComponent(symbol)}?range=1d&interval=1d`;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 8000);
+      try {
+        const res = await fetch(url, { headers: YF_HEADERS, signal: controller.signal });
+        if (!res.ok) continue;
+        const data = await res.json();
+        const meta = data?.chart?.result?.[0]?.meta;
+        const price = meta?.regularMarketPrice;
+        if (price && price > 0) {
+          const prevClose = meta?.chartPreviousClose || meta?.previousClose || 0;
+          return {
+            price,
+            prevClose,
+            change: prevClose ? price - prevClose : 0,
+            changePct: prevClose ? ((price - prevClose) / prevClose) * 100 : 0,
+          };
+        }
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch {}
+  }
+  return null;
+}
+
+// Historical OHLCV from Yahoo (for Nasdaq/S&P index history)
+async function yfHistory(symbol: string, days: number = 300): Promise<OHLCVRow[]> {
+  const range = days > 365 ? "2y" : "1y";
+  for (const host of ["query2.finance.yahoo.com", "query1.finance.yahoo.com"]) {
+    try {
+      const url = `https://${host}/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=1d`;
+      const res = await fetchWithTimeout(url, 15000);
+      if (!res.ok) continue;
+      const data = await res.json();
+      const result = data?.chart?.result?.[0];
+      const ts = result?.timestamp;
+      const q = result?.indicators?.quote?.[0];
+      if (!ts || !q) continue;
+      const rows: OHLCVRow[] = [];
+      for (let i = 0; i < ts.length; i++) {
+        if (q.close?.[i] == null) continue;
+        rows.push({
+          date: new Date(ts[i] * 1000).toISOString().split("T")[0],
+          open: q.open?.[i] ?? 0,
+          high: q.high?.[i] ?? 0,
+          low: q.low?.[i] ?? 0,
+          close: q.close[i],
+          volume: q.volume?.[i] ?? 0,
+        });
+      }
+      if (rows.length > 0) {
+        console.log(`Yahoo history for ${symbol}: ${rows.length} bars`);
+        return rows;
+      }
+    } catch {}
+  }
+  return [];
 }
 
 interface OHLCVRow {
@@ -456,36 +521,71 @@ export async function computeDashboardData(): Promise<DashboardData> {
 
   console.log("Fetching fresh data from Twelve Data...");
 
-  // Twelve Data: 8 credits/min (each symbol in batch = 1 credit).
-  // We have 9 quote symbols + 2 history = 11 total. Can't fit in 1 minute.
-  // Strategy: fetch 6 quotes + 2 history = 8 credits in first call,
-  // then remaining 3 quotes via Alpha Vantage (no TD credit cost).
-  const tdSymbols = TICKER_STRIP.map((t) => t.tdSymbol);
-  const tdBatch = tdSymbols.slice(0, 6);  // 6 credits
-  const avBatch = tdSymbols.slice(6);     // 3 via Alpha Vantage
+  // Data fetch strategy:
+  // 1. Yahoo: Nasdaq (^IXIC) + S&P 500 (^GSPC) quotes and 300d history (real indices, not ETFs)
+  // 2. Twelve Data: ETF quotes (TLT, JNK, USO, DBA, GLD) — 5 credits
+  // 3. CBOE: VIX, VIX3M, VIX6M (already fetched below)
+  // 4. DXY: calculated from forex (already handled below)
+  // Yahoo fallback: if Yahoo is blocked, use QQQ/SPY from Twelve Data
 
-  console.log(`Fetching: history(2) + TD quotes(${tdBatch.join(",")}) + AV quotes(${avBatch.join(",")})`);
-  const [nasdaqHistoryRaw, sp500HistoryRaw, td1] = await Promise.all([
-    fetchHistory("QQQ", 300),   // 1 TD credit
-    fetchHistory("SPY", 300),   // 1 TD credit
-    tdQuoteBatch(tdBatch),      // 6 TD credits = total 8
+  console.log("Fetching index data from Yahoo + ETF quotes from Twelve Data...");
+
+  // Fetch real index history from Yahoo (primary) with TD ETF fallback
+  const [yfNasdaqHist, yfSP500Hist] = await Promise.all([
+    yfHistory("^IXIC", 300),
+    yfHistory("^GSPC", 300),
   ]);
-
-  // Remaining 3 quotes via Alpha Vantage (no TD credits)
-  const avResults: Record<string, any> = {};
-  for (const sym of avBatch) {
-    const av = await avQuote(sym);
-    if (av && av.price > 0) {
-      avResults[sym] = {
-        close: String(av.price),
-        previous_close: String(av.prevClose),
-        percent_change: String(av.changePct),
-      };
-      console.log(`Got ${sym} via Alpha Vantage: $${av.price}`);
-    }
+  let nasdaqHistoryRaw = yfNasdaqHist;
+  let sp500HistoryRaw = yfSP500Hist;
+  if (nasdaqHistoryRaw.length === 0) {
+    console.warn("Yahoo ^IXIC blocked, falling back to QQQ");
+    nasdaqHistoryRaw = await fetchHistory("QQQ", 300);
+  }
+  if (sp500HistoryRaw.length === 0) {
+    console.warn("Yahoo ^GSPC blocked, falling back to SPY");
+    sp500HistoryRaw = await fetchHistory("SPY", 300);
   }
 
-  const quotesData = parseTdQuotes({ ...td1, ...avResults });
+  // Fetch real index quotes from Yahoo
+  const [yfNasdaqQuote, yfSP500Quote] = await Promise.all([
+    yfQuoteFull("^IXIC"),
+    yfQuoteFull("^GSPC"),
+  ]);
+
+  // Fetch ETF quotes from Twelve Data (only the ETFs, not indices)
+  const etfSymbols = ["TLT", "JNK", "USO", "DBA", "GLD"];
+  const tdEtfData = await tdQuoteBatch(etfSymbols);  // 5 TD credits
+
+  // Build quotesData from all sources
+  const quotesData: QuoteData[] = [];
+  for (const ticker of TICKER_STRIP) {
+    // Nasdaq: from Yahoo
+    if (ticker.displaySymbol === "^IXIC" && yfNasdaqQuote) {
+      quotesData.push({ symbol: "^IXIC", name: "Nasdaq", price: yfNasdaqQuote.price, change: yfNasdaqQuote.change, changePercent: yfNasdaqQuote.changePct, previousClose: yfNasdaqQuote.prevClose });
+      continue;
+    }
+    // S&P 500: from Yahoo, fallback to CBOE SPX
+    if (ticker.displaySymbol === "^GSPC" && yfSP500Quote) {
+      quotesData.push({ symbol: "^GSPC", name: "S&P 500", price: yfSP500Quote.price, change: yfSP500Quote.change, changePercent: yfSP500Quote.changePct, previousClose: yfSP500Quote.prevClose });
+      continue;
+    }
+    // VIX and DXY: placeholders, overridden below by CBOE/forex
+    if (ticker.displaySymbol === "^VIX" || ticker.displaySymbol === "DX-Y.NYB") {
+      quotesData.push({ symbol: ticker.displaySymbol, name: ticker.name, price: 0, change: 0, changePercent: 0, previousClose: 0 });
+      continue;
+    }
+    // ETFs: from Twelve Data
+    const q = tdEtfData[ticker.tdSymbol];
+    if (q && q.close && !q.code) {
+      const price = parseFloat(q.close) || 0;
+      const prevClose = parseFloat(q.previous_close) || 0;
+      const change = price - prevClose;
+      const changePct = prevClose ? (change / prevClose) * 100 : 0;
+      quotesData.push({ symbol: ticker.displaySymbol, name: ticker.name, price, change, changePercent: changePct, previousClose: prevClose });
+    } else {
+      quotesData.push({ symbol: ticker.displaySymbol, name: ticker.name, price: 0, change: 0, changePercent: 0, previousClose: 0 });
+    }
+  }
 
   // Twelve Data includes today's bar during market hours, so no need to
   // synthesize. Just copy the arrays.
