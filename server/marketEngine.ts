@@ -118,7 +118,44 @@ async function avHistory(symbol: string): Promise<any[]> {
   } catch { return []; }
 }
 
-// ── Yahoo (VIX term structure only — best effort) ──────────────────────
+// ── CBOE (authoritative VIX source) ─────────────────────────────────
+// CBOE publishes daily CSV files for VIX, VIX3M, VIX6M — no API key needed.
+// Format: DATE,OPEN,HIGH,LOW,CLOSE
+
+interface CboeVixData {
+  close: number;
+  open: number;
+  high: number;
+  low: number;
+  prevClose: number;
+}
+
+async function cboeVixQuote(index: string): Promise<CboeVixData | null> {
+  // index = "VIX", "VIX3M", or "VIX6M"
+  const url = `https://cdn.cboe.com/api/global/us_indices/daily_prices/${index}_History.csv`;
+  try {
+    const res = await fetchWithTimeout(url, 10000);
+    if (!res.ok) return null;
+    const text = await res.text();
+    const lines = text.trim().split("\n").filter(l => l.length > 5);
+    if (lines.length < 3) return null;
+    // Last line = today (or most recent), second-to-last = previous day
+    const lastLine = lines[lines.length - 1].split(",");
+    const prevLine = lines[lines.length - 2].split(",");
+    return {
+      close: parseFloat(lastLine[4]) || 0,
+      open: parseFloat(lastLine[1]) || 0,
+      high: parseFloat(lastLine[2]) || 0,
+      low: parseFloat(lastLine[3]) || 0,
+      prevClose: parseFloat(prevLine[4]) || 0,
+    };
+  } catch (err: any) {
+    console.warn(`CBOE ${index} fetch failed: ${err.message}`);
+    return null;
+  }
+}
+
+// ── Yahoo (VIX futures M1/M2 only — best effort) ──────────────────
 
 const YF_HEADERS: Record<string, string> = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -493,50 +530,54 @@ export async function computeDashboardData(): Promise<DashboardData> {
   const ema10vs21Pct = currentEMA21 ? ((currentEMA10 - currentEMA21) / currentEMA21) * 100 : 0;
   const ema21vs50Pct = currentSMA50 ? ((currentEMA21 - currentSMA50) / currentSMA50) * 100 : 0;
 
-  // VIX: fetch real CBOE VIX (^VIX) from Yahoo + term structure in one batch.
-  // VIXY from ticker strip is just a fallback if Yahoo is blocked.
+  // VIX: CBOE is the authoritative source (free CSV, no API key, works from cloud).
+  // Yahoo used only for M1/M2 futures which CBOE doesn't publish.
+  let realVixPrice = 0;
   let vix3mPrice = 0;
   let vix6mPrice = 0;
   let m1Price = 0;
   let m2Price = 0;
-  let realVixPrice = 0;
   let vixContango = false;
-  try {
-    const [vixYahoo, v3m, v6m, m1, m2] = await Promise.all([
-      yfQuoteSafe("^VIX"),
-      yfQuoteSafe("^VIX3M"),
-      yfQuoteSafe("^VIX6M"),
-      yfQuoteSafe("^VW1VX"),
-      yfQuoteSafe("^VW2VX"),
-    ]);
-    realVixPrice = vixYahoo;
-    vix3mPrice = v3m;
-    vix6mPrice = v6m;
-    m1Price = m1;
-    m2Price = m2;
-    if (realVixPrice > 0) console.log(`CBOE VIX via Yahoo: ${realVixPrice}`);
-    if (vix3mPrice > 0) console.log(`VIX term structure: VIX3M=${vix3mPrice} VIX6M=${vix6mPrice} M1=${m1Price} M2=${m2Price}`);
-    else console.warn("VIX term structure unavailable (Yahoo blocked)");
-  } catch {}
 
-  // Use real CBOE VIX if available, otherwise fall back to VIXY from ticker strip
-  const vixFallback = quotesData.find((q) => q.symbol === "^VIX");
-  const vixPrice = realVixPrice > 0 ? realVixPrice : (vixFallback?.price || 0);
+  // Fetch VIX, VIX3M, VIX6M from CBOE + M1/M2 from Yahoo in parallel
+  const [cboeVix, cboeVix3m, cboeVix6m, m1Yahoo, m2Yahoo] = await Promise.all([
+    cboeVixQuote("VIX"),
+    cboeVixQuote("VIX3M"),
+    cboeVixQuote("VIX6M"),
+    yfQuoteSafe("^VW1VX"),
+    yfQuoteSafe("^VW2VX"),
+  ]);
 
-  // Override the VIX entry in quotesData with real CBOE VIX price for ticker strip
-  if (realVixPrice > 0) {
-    const vixIdx = quotesData.findIndex((q) => q.symbol === "^VIX");
-    if (vixIdx >= 0) {
-      const prevClose = quotesData[vixIdx].previousClose || realVixPrice;
-      quotesData[vixIdx] = {
-        symbol: "^VIX",
-        name: "VIX",
-        price: realVixPrice,
-        change: realVixPrice - prevClose,
-        changePercent: prevClose ? ((realVixPrice - prevClose) / prevClose) * 100 : 0,
-        previousClose: prevClose,
-      };
-    }
+  if (cboeVix) {
+    realVixPrice = cboeVix.close;
+    console.log(`CBOE VIX: ${realVixPrice} (prev: ${cboeVix.prevClose})`);
+  }
+  if (cboeVix3m) {
+    vix3mPrice = cboeVix3m.close;
+    console.log(`CBOE VIX3M: ${vix3mPrice}`);
+  }
+  if (cboeVix6m) {
+    vix6mPrice = cboeVix6m.close;
+    console.log(`CBOE VIX6M: ${vix6mPrice}`);
+  }
+  m1Price = m1Yahoo;
+  m2Price = m2Yahoo;
+  if (m1Price > 0) console.log(`VIX futures via Yahoo: M1=${m1Price} M2=${m2Price}`);
+
+  const vixPrice = realVixPrice;
+
+  // Override the VIX entry in quotesData with real CBOE VIX for ticker strip
+  const vixIdx = quotesData.findIndex((q) => q.symbol === "^VIX");
+  if (vixIdx >= 0 && realVixPrice > 0) {
+    const prevClose = cboeVix?.prevClose || 0;
+    quotesData[vixIdx] = {
+      symbol: "^VIX",
+      name: "VIX",
+      price: realVixPrice,
+      change: prevClose ? realVixPrice - prevClose : 0,
+      changePercent: prevClose ? ((realVixPrice - prevClose) / prevClose) * 100 : 0,
+      previousClose: prevClose,
+    };
   }
 
   vixContango = vix3mPrice > vixPrice;
