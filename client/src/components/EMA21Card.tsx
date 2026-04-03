@@ -11,14 +11,14 @@ export function EMA21Card({ indicator }: Props) {
 
   const statusLabel = {
     green_light: "GREEN LIGHT",
-    pink_bar: "BELOW 21 EMA",
+    caution: "BELOW 21 EMA",
     confirming: "CONFIRMING",
     neutral: "ABOVE 21 EMA",
   }[status] ?? "ABOVE 21 EMA";
 
   const statusColors: Record<string, string> = {
     green_light: "bg-emerald-500/15 text-emerald-500",
-    pink_bar: "bg-pink-500/15 text-pink-500",
+    caution: "bg-pink-500/15 text-pink-500",
     confirming: "bg-amber-500/15 text-amber-500",
     neutral: "bg-muted text-muted-foreground",
   };
