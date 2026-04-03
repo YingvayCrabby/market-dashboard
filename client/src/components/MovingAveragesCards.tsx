@@ -3,8 +3,6 @@ import { TrendingUp, TrendingDown } from "lucide-react";
 
 interface Props {
   ma: MovingAverages;
-  pctAbove21EMA: number;
-  pctAbove50SMA: number;
 }
 
 function MACard({ label, value, price }: { label: string; value: number; price: number }) {
@@ -42,7 +40,7 @@ function PctCard({ label, value, description }: { label: string; value: number; 
   );
 }
 
-export function MovingAveragesCards({ ma, pctAbove21EMA, pctAbove50SMA }: Props) {
+export function MovingAveragesCards({ ma }: Props) {
   return (
     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
       <div className="rounded-xl border border-border bg-card p-4">
@@ -54,20 +52,6 @@ export function MovingAveragesCards({ ma, pctAbove21EMA, pctAbove50SMA }: Props)
       <MACard label="21 EMA" value={ma.ema21} price={ma.currentPrice} />
       <MACard label="50 SMA" value={ma.sma50} price={ma.currentPrice} />
       <MACard label="200 SMA" value={ma.sma200} price={ma.currentPrice} />
-      
-      {/* Additional pct cards in a second row */}
-      <div className="col-span-2 sm:col-span-3 lg:col-span-5 grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <PctCard
-          label="Nasdaq vs 21 EMA"
-          value={pctAbove21EMA}
-          description={`Nasdaq is ${pctAbove21EMA >= 0 ? "above" : "below"} the 21-day exponential moving average`}
-        />
-        <PctCard
-          label="Nasdaq vs 50 SMA"
-          value={pctAbove50SMA}
-          description={`Nasdaq is ${pctAbove50SMA >= 0 ? "above" : "below"} the 50-day simple moving average`}
-        />
-      </div>
     </div>
   );
 }
