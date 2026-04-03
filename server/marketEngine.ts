@@ -155,6 +155,67 @@ async function cboeVixQuote(index: string): Promise<CboeVixData | null> {
   }
 }
 
+// ── DXY (US Dollar Index) — calculated from ICE formula ─────────────
+// DXY = 50.14348112 × EURUSD^(−0.576) × USDJPY^(0.136) × GBPUSD^(−0.119)
+//       × USDCAD^(0.091) × USDSEK^(0.042) × USDCHF^(0.036)
+// Uses 6 forex pairs from Twelve Data (free, no rate limit on forex).
+
+const DXY_PAIRS = ["EUR/USD", "USD/JPY", "GBP/USD", "USD/CAD", "USD/SEK", "USD/CHF"];
+
+async function calculateDXY(): Promise<{ price: number; prevClose: number } | null> {
+  if (!TD_API_KEY) return null;
+  try {
+    const url = `${TD_BASE}/quote?symbol=${DXY_PAIRS.join(",")}&apikey=${TD_API_KEY}`;
+    const res = await fetchWithTimeout(url);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.code) return null;
+
+    const get = (sym: string, field: string) => parseFloat(data[sym]?.[field]) || 0;
+    const eurusd = get("EUR/USD", "close");
+    const usdjpy = get("USD/JPY", "close");
+    const gbpusd = get("GBP/USD", "close");
+    const usdcad = get("USD/CAD", "close");
+    const usdsek = get("USD/SEK", "close");
+    const usdchf = get("USD/CHF", "close");
+
+    if (!eurusd || !usdjpy || !gbpusd || !usdcad || !usdsek || !usdchf) return null;
+
+    const price = 50.14348112
+      * Math.pow(eurusd, -0.576)
+      * Math.pow(usdjpy, 0.136)
+      * Math.pow(gbpusd, -0.119)
+      * Math.pow(usdcad, 0.091)
+      * Math.pow(usdsek, 0.042)
+      * Math.pow(usdchf, 0.036);
+
+    // Calculate previous close DXY from previous closes
+    const eurusdP = get("EUR/USD", "previous_close");
+    const usdjpyP = get("USD/JPY", "previous_close");
+    const gbpusdP = get("GBP/USD", "previous_close");
+    const usdcadP = get("USD/CAD", "previous_close");
+    const usdsekP = get("USD/SEK", "previous_close");
+    const usdchfP = get("USD/CHF", "previous_close");
+
+    let prevClose = 0;
+    if (eurusdP && usdjpyP && gbpusdP && usdcadP && usdsekP && usdchfP) {
+      prevClose = 50.14348112
+        * Math.pow(eurusdP, -0.576)
+        * Math.pow(usdjpyP, 0.136)
+        * Math.pow(gbpusdP, -0.119)
+        * Math.pow(usdcadP, 0.091)
+        * Math.pow(usdsekP, 0.042)
+        * Math.pow(usdchfP, 0.036);
+    }
+
+    console.log(`DXY calculated from forex: ${price.toFixed(2)} (prev: ${prevClose.toFixed(2)})`);
+    return { price, prevClose };
+  } catch (err: any) {
+    console.warn(`DXY calculation failed: ${err.message}`);
+    return null;
+  }
+}
+
 // ── Yahoo (VIX futures M1/M2 only — best effort) ──────────────────
 
 const YF_HEADERS: Record<string, string> = {
@@ -276,7 +337,7 @@ const TICKER_STRIP = [
   { tdSymbol: "QQQ",  name: "Nasdaq",  displaySymbol: "^IXIC" },
   { tdSymbol: "SPY",  name: "S&P 500", displaySymbol: "^GSPC" },
   { tdSymbol: "VIXY", name: "VIX",     displaySymbol: "^VIX" },
-  { tdSymbol: "UUP",  name: "DXY",     displaySymbol: "DX-Y.NYB" },
+  { tdSymbol: "UUP",  name: "DXY",     displaySymbol: "DX-Y.NYB" },  // placeholder, overridden with real DXY
   { tdSymbol: "TLT",  name: "TLT",     displaySymbol: "TLT" },
   { tdSymbol: "JNK",  name: "JNK",     displaySymbol: "JNK" },
   { tdSymbol: "USO",  name: "USO",     displaySymbol: "USO" },
@@ -581,6 +642,24 @@ export async function computeDashboardData(): Promise<DashboardData> {
   }
 
   vixContango = vix3mPrice > vixPrice;
+
+  // DXY: Calculate real US Dollar Index from 6 forex pairs (ICE formula)
+  const dxyResult = await calculateDXY();
+  if (dxyResult && dxyResult.price > 0) {
+    const dxyIdx = quotesData.findIndex((q) => q.symbol === "DX-Y.NYB");
+    if (dxyIdx >= 0) {
+      const change = dxyResult.prevClose ? dxyResult.price - dxyResult.prevClose : 0;
+      const changePct = dxyResult.prevClose ? (change / dxyResult.prevClose) * 100 : 0;
+      quotesData[dxyIdx] = {
+        symbol: "DX-Y.NYB",
+        name: "DXY",
+        price: Math.round(dxyResult.price * 100) / 100,
+        change: Math.round(change * 100) / 100,
+        changePercent: Math.round(changePct * 100) / 100,
+        previousClose: Math.round(dxyResult.prevClose * 100) / 100,
+      };
+    }
+  }
 
   let vixContext = "complacent";
   if (vixPrice < 14) vixContext = "complacent";
