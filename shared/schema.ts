@@ -19,7 +19,7 @@ export interface MovingAverages {
 }
 
 export interface WebsterEMA21Indicator {
-  // Pink Bar: daily high below 21 EMA (brakes are on)
+  // Caution: daily high below 21 EMA (brakes are on)
   isPinkBar: boolean;
   // 3-Day Low Rule: index low above 21 EMA for 3 consecutive days + up close on 3rd day
   threeDayRule: {
@@ -35,7 +35,7 @@ export interface WebsterEMA21Indicator {
   below200SMA: boolean;
   // Current 21 EMA value
   ema21Value: number;
-  // Overall status: 'green_light' | 'pink_bar' | 'neutral' | 'confirming'
+  // Overall status: 'green_light' | 'caution' | 'neutral' | 'confirming'
   status: string;
 }
 
