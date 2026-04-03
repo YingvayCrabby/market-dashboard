@@ -493,37 +493,59 @@ export async function computeDashboardData(): Promise<DashboardData> {
   const ema10vs21Pct = currentEMA21 ? ((currentEMA10 - currentEMA21) / currentEMA21) * 100 : 0;
   const ema21vs50Pct = currentSMA50 ? ((currentEMA21 - currentSMA50) / currentSMA50) * 100 : 0;
 
-  // VIX + Contango (VIX3M > VIX = contango)
-  const vixQuote = quotesData.find((q) => q.symbol === "^VIX");
-  const vixPrice = vixQuote?.price || 0;
-  let vixContext = "complacent";
-  if (vixPrice < 14) vixContext = "complacent";
-  else if (vixPrice < 18) vixContext = "low";
-  else if (vixPrice < 25) vixContext = "elevated";
-  else vixContext = "fear";
-
-  // Fetch VIX term structure: VIX3M, VIX6M, M1 (front-month), M2 (second-month)
-  // These are only available via Yahoo — best-effort, returns 0 if blocked
+  // VIX: fetch real CBOE VIX (^VIX) from Yahoo + term structure in one batch.
+  // VIXY from ticker strip is just a fallback if Yahoo is blocked.
   let vix3mPrice = 0;
   let vix6mPrice = 0;
   let m1Price = 0;
   let m2Price = 0;
+  let realVixPrice = 0;
   let vixContango = false;
   try {
-    const [v3m, v6m, m1, m2] = await Promise.all([
+    const [vixYahoo, v3m, v6m, m1, m2] = await Promise.all([
+      yfQuoteSafe("^VIX"),
       yfQuoteSafe("^VIX3M"),
       yfQuoteSafe("^VIX6M"),
       yfQuoteSafe("^VW1VX"),
       yfQuoteSafe("^VW2VX"),
     ]);
+    realVixPrice = vixYahoo;
     vix3mPrice = v3m;
     vix6mPrice = v6m;
     m1Price = m1;
     m2Price = m2;
-    vixContango = vix3mPrice > vixPrice;
-    if (vix3mPrice > 0) console.log(`VIX term structure via Yahoo: VIX3M=${vix3mPrice} VIX6M=${vix6mPrice} M1=${m1Price} M2=${m2Price}`);
+    if (realVixPrice > 0) console.log(`CBOE VIX via Yahoo: ${realVixPrice}`);
+    if (vix3mPrice > 0) console.log(`VIX term structure: VIX3M=${vix3mPrice} VIX6M=${vix6mPrice} M1=${m1Price} M2=${m2Price}`);
     else console.warn("VIX term structure unavailable (Yahoo blocked)");
   } catch {}
+
+  // Use real CBOE VIX if available, otherwise fall back to VIXY from ticker strip
+  const vixFallback = quotesData.find((q) => q.symbol === "^VIX");
+  const vixPrice = realVixPrice > 0 ? realVixPrice : (vixFallback?.price || 0);
+
+  // Override the VIX entry in quotesData with real CBOE VIX price for ticker strip
+  if (realVixPrice > 0) {
+    const vixIdx = quotesData.findIndex((q) => q.symbol === "^VIX");
+    if (vixIdx >= 0) {
+      const prevClose = quotesData[vixIdx].previousClose || realVixPrice;
+      quotesData[vixIdx] = {
+        symbol: "^VIX",
+        name: "VIX",
+        price: realVixPrice,
+        change: realVixPrice - prevClose,
+        changePercent: prevClose ? ((realVixPrice - prevClose) / prevClose) * 100 : 0,
+        previousClose: prevClose,
+      };
+    }
+  }
+
+  vixContango = vix3mPrice > vixPrice;
+
+  let vixContext = "complacent";
+  if (vixPrice < 14) vixContext = "complacent";
+  else if (vixPrice < 18) vixContext = "low";
+  else if (vixPrice < 25) vixContext = "elevated";
+  else vixContext = "fear";
 
   // M1 vs M2 spread: (M2 - M1) / M1 * 100 — positive = contango
   const m1m2Spread = m1Price > 0 ? ((m2Price - m1Price) / m1Price) * 100 : 0;
